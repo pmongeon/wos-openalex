@@ -1,0 +1,605 @@
+---
+title: Data collection
+# date: 2024-11-12
+authors:
+  - name: Philippe Mongeon
+    orcid: 0000-0003-1021-059X
+theme:
+  dark: darkly
+  light: flatly
+execute:
+  warning: false
+  message: false
+  error: false
+  eval: false
+---
+
+```{r load_packages}
+library(tidyverse)
+library(kableExtra)
+library(readxl)
+library(writexl)
+```
+
+## Retrieving metadata from the Web of Science
+
+```{sql echo=FALSE, eval=FALSE}
+use WoS;
+ select a.code_discipline, a.OST_BK, i.Identifier as doi, a.Code_Document, Annee_Bibliographique as pub_year, Nb_Adresse as n_address, count(distinct ad.Institution) as n_inst, Nb_Auteur as n_author, Nb_Reference as n_ref, count(distinct c.OST_BK_Cite) as n_ref_indexed, l.Type as lang_type, l.Language as lang
+into BDMongeon.dbo.wos_all
+from pex.Article as a
+join pex.Liste_revue as r on r.Code_Revue = a.Code_Revue
+left join dbo.Identifier as i on i.OST_BK = a.OST_BK and i.Type = 'doi'
+left join dbo.Language_Normalized as l on l.OST_BK = a.OST_BK
+left join pex.Citations as c on c.OST_BK_Citant = a.OST_BK
+left join pex.Adresse as ad on ad.OST_BK = a.OST_BK
+where Annee_Bibliographique >= 2021 and 
+      Annee_Bibliographique <= 2023 and 
+      i.Identifier is not null
+group by a.code_discipline, a.OST_BK, i.Identifier, a.Code_Document, a.Annee_Bibliographique, Nb_Adresse , Nb_Auteur , Nb_Reference , l.Type , l.Language;
+
+select * from BDMongeon..wos_all
+```
+
+```{r}
+wos_data <- read_delim("data/wos_all.csv", col_names = F, delim = ";")
+colnames(wos_data) <- c("discipline", "OST_BK", "wos_doi","wos_type","wos_pub_year","wod_n_address","wos_n_inst","wos_n_author","wos_n_ref","wos_n_ref_indexed", "wos_lang_type","wos_language")
+# 7661474
+```
+
+### removing records with multiple doc types
+
+```{r}
+wos_data<-wos_data %>% 
+  group_by(wos_doi, wos_type) %>% 
+  mutate(n = n()) %>% 
+  filter(n == 1) %>% 
+  ungroup() %>% 
+  select(-n)
+# 7631080
+
+```
+
+## Retrieving data from OpenAlex
+
+The commented code was used to collect data through BigQuery and save the data in a .rds file for future.
+
+```{r}
+library(bigrquery)
+sql <- str_c("select * from `global-timer-415013.wos_openalex.oa_works`")
+tb <- bq_project_query(billing, sql)
+openalex_works<-bq_table_download(tb)
+ saveRDS(openalex_works, "data/openalex_works.rds")
+```
+
+```{r}
+oa_works <- readRDS("data/openalex_works.rds")
+colnames(oa_works) <- c("oa_doi","oa_type","oa_pub_year","oa_n_inst","oa_n_author", "oa_n_ref_indexed", "oa_language")
+```
+
+## Creating dataset for analysis
+
+```{r message=FALSE, warning=FALSE}
+data<-wos_data %>% 
+  inner_join(oa_works, by=c("wos_doi" = "oa_doi"))
+# 6,599,479 lines
+
+data<-data %>% 
+  rename(doi = wos_doi) %>% 
+  group_by(doi) %>% 
+# Include only articles with only one DOI match between WoS and OpenAlex.
+  mutate(n=n()) %>% 
+  filter(n == 1) %>%
+  select(-n) %>% 
+  ungroup() %>% 
+  group_by(OST_BK) %>% 
+  mutate(n=n()) %>% 
+  filter(n == 1) %>%
+  select(-n) %>% 
+  ungroup()
+# 6,594,747 documents
+
+# replace wos_type code with text
+data<-data %>% 
+  inner_join(read_tsv("data/Liste_Document.txt") %>% select(Code_Document, doc_type = EType_Document), by=c("wos_type" = "Code_Document")) %>% 
+  select(-wos_type) %>% 
+  rename(wos_type = doc_type) %>% 
+  mutate(wos_type = str_to_lower(wos_type))  
+
+# Add disciplines
+data <- data %>%
+  inner_join(read_xlsx("data/Liste_Discipline.xlsx") %>% 
+               select(Code_Discipline, EDiscipline, ESpecialite, discipline_group), by=c("discipline" = "Code_Discipline"))
+
+saveRDS(data, "data/_data.rds")
+rm(oa_works, wos_data)
+
+## To just load the file
+data<-readRDS("data/_data.rds")
+```
+
+## Identifying discrepancies
+
+Function for sample size
+
+```{r}
+sample_size<-function(N, c=.95) {
+  if(c == 0.95) n0 <- (1.96^2 * 0.5 * (1 - 0.5)) / (0.05^2)
+  if(c == 0.99) n0 <- (2.576^2 * 0.5 * (1 - 0.5)) / (0.05^2)
+  return(round(n0 / (1 + ((n0 - 1) / N))))
+} 
+```
+
+### Document type
+
+This code creates tibble containing all the cases where there is a discrepancy in the document type.
+
+```{r message=FALSE, warning=FALSE}
+
+doc_type_discrepancies<-data %>% 
+  mutate(discrepancy_doc_type = ifelse(oa_type!=wos_type,T,F)) %>% 
+  mutate(discrepancy_doc_type = ifelse(oa_type=="article" & wos_type == "review",F,discrepancy_doc_type)) %>% 
+  mutate(discrepancy_doc_type = ifelse(oa_type=="review" & wos_type == "article",F,discrepancy_doc_type)) %>% 
+  filter(discrepancy_doc_type == T) %>% 
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, doi, doi_url, oa_type, wos_type)
+  
+# Number of doc type discrepancies: 582,786
+
+writexl::write_xlsx(doc_type_discrepancies,"data/_all_doc_type_discrepancies.xlsx")
+
+doc_type_discrepancies %>%
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, doi, doi_url, oa_type, wos_type) %>% 
+  filter(oa_type %in% c("article","review") | wos_type %in% c("review","article")) %>% 
+  count()
+# 427,953
+```
+
+#### Sample
+
+```{r}
+doc_type_discrepancies %>% 
+  filter(oa_type %in% c("article","review")) %>%
+  filter(!wos_type %in% c("article","review","meeting_abstract")) %>% 
+  slice_sample(prop=sample_size(418965)/418965, by=c("discipline_group","wos_type")) %>% 
+  writexl::write_xlsx("data/_final_oa_doc_type_sample.xlsx")
+
+doc_type_discrepancies %>% 
+  filter(wos_type %in% c("article","review")) %>%
+  filter(!oa_type %in% c("article","review")) %>% 
+  slice_sample(prop=sample_size(8988)/8988, by=c("discipline_group","wos_type")) %>% 
+  writexl::write_xlsx("data/_final_wos_doc_type_sample.xlsx")
+
+# 427593 total
+# 8988 for WoS
+# 418965 for OpenAlex
+```
+
+### Subset of articles with no document type discrepancies
+
+```{r}
+data_articles <- data %>%
+  filter(wos_type %in% c("review","article")) %>%
+  filter(oa_type %in% c("review","article"))
+# 5924459 articles 
+
+saveRDS(data_articles, "data/_data_articles.rds")
+
+data_articles <- readRDS("data/_data_articles.rds")
+
+```
+
+### Publication year
+
+```{r}
+# Identify dicrepancies
+pub_year_discrepancies<-data_articles %>%
+  filter(wos_type %in% c("review","article")) %>% 
+  filter(wos_pub_year - oa_pub_year != 0) %>% 
+  mutate(diff_pub_year = wos_pub_year - oa_pub_year) %>% 
+  mutate(bin = case_when(diff_pub_year < -3 ~ "< -3",
+                         diff_pub_year %in% (-2:-3) ~ "-2 to -3",
+                         diff_pub_year == -1 ~ "-1",
+                         diff_pub_year == 1 ~ "1",
+                         diff_pub_year %in% 2:3 ~ "2 to 3",
+                         diff_pub_year > 3 ~ "> 3",
+                         ))
+
+# Sample  
+sample_pub_year_discrepancies <- pub_year_discrepancies %>% 
+  slice_sample(prop = sample_size(469124)/469124, by = c("discipline_group", "bin"))
+
+## Adjust the sample by removing 43 observations in the "1" bin and redistributing them to other bins.
+sample_pub_year_discrepancies %>% 
+  group_by(bin) %>% 
+  reframe(n = n()) %>%
+  arrange(desc(n))
+
+sample_pub_year_discrepancies <- bind_rows(sample_pub_year_discrepancies,
+                                           pub_year_discrepancies %>% 
+                                             filter(bin == "-2 to -3") %>% 
+                                             slice_sample(n = 20))
+  
+sample_pub_year_discrepancies <- bind_rows(sample_pub_year_discrepancies,
+                                           pub_year_discrepancies %>% 
+                                             filter(bin == "> 3") %>% 
+                                             slice_sample(n = 20))
+
+
+sample_pub_year_discrepancies <- bind_rows(sample_pub_year_discrepancies,
+                                           pub_year_discrepancies %>% 
+                                             filter(bin == "2 to 3") %>% 
+                                             slice_sample(n = 3))
+
+to_remove <- sample_pub_year_discrepancies %>% 
+  filter(bin == "1") %>% 
+  slice_sample(n = 43)
+
+sample_pub_year_discrepancies <- sample_pub_year_discrepancies %>% 
+  filter(!doi %in% to_remove$doi) %>% 
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, bin, doi, doi_url, oa_pub_year, wos_pub_year,
+         diff_pub_year)
+
+# Export in Excel for manual validation
+# sample_pub_year_discrepancies %>%
+#   mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+#   select(discipline_group, bin, doi, doi_url, oa_pub_year, wos_pub_year, diff_pub_year) %>% 
+#   mutate(correct_pub_year = as.numeric(NA)) %>% 
+#   writexl::write_xlsx("data/discrepancy_sample_pub_year.xlsx")
+```
+
+### Language
+
+#### Number of records by language
+
+```{r}
+lang_data <- data_articles %>%
+  select(discipline_group, doi, wos_language, oa_language)
+```
+
+```{r}
+wos_lang<-lang_data %>% 
+  group_by(discipline_group, wos_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  pivot_wider(names_from = discipline_group, values_from = n) %>%
+  mutate(across(everything(), ~replace(., is.na(.), 0))) %>% 
+  mutate(total = AH+BM+NSE+SS) %>% 
+  mutate(rank = rank(desc(total))) %>% 
+  mutate(wos_language = ifelse(rank <= 10, wos_language, "Other")) %>% 
+  mutate(rank = ifelse(rank >= 11, 11, rank)) %>% 
+  group_by(wos_language, rank) %>% 
+  reframe(NSE = sum(NSE),
+           BM = sum(BM),
+           SS = sum(SS),
+           AH = sum(AH),
+           total = sum(total)) %>% 
+  arrange(rank) %>% 
+  select(-rank)
+```
+
+```{r}
+oa_lang<-lang_data %>% 
+  filter(!is.na(oa_language)) %>% 
+  group_by(discipline_group, oa_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  pivot_wider(names_from = discipline_group, values_from = n) %>%
+  mutate(total = AH+BM+NSE+SS) %>%
+  mutate(rank = rank(desc(total))) %>% 
+  arrange(rank) %>% 
+  mutate(oa_language = case_when(oa_language == "en" ~ "English",
+                                 oa_language == "es" ~ "Spanish",
+                                 oa_language == "de" ~ "German",
+                                 oa_language == "fr" ~ "French",
+                                 oa_language == "pt" ~ "Portugese",
+                                 oa_language == "pl" ~ "Polish",
+                                 oa_language == "tr" ~ "Turkish",
+                                 oa_language == "hu" ~ "Hungarian",
+                                 oa_language == "hr" ~ "Croatian",
+                                 oa_language == "ro" ~ "Romanian"
+                                 )) %>% 
+  mutate(oa_language = ifelse(is.na(oa_language),"Other",oa_language)) %>% 
+  mutate(rank = ifelse(rank >= 11, 11, rank)) %>% 
+  group_by(oa_language, rank) %>% 
+  reframe(NSE = sum(NSE),
+           BM = sum(BM),
+           SS = sum(SS),
+           AH = sum(AH),
+           total = sum(total)) %>% 
+  arrange(rank) %>% 
+  select(-rank)
+```
+
+#### Discrepancies
+
+Create a excel file with all combinations of language and check whether they are the same language
+
+```{r}
+#Conversion of languages
+# data %>% 
+#   group_by(wos_language, oa_language) %>% 
+#   reframe(n = n()) %>% 
+#   drop_na() %>% 
+#   writexl::write_xlsx("data/language_conversion.xlsx")
+```
+
+```{r}
+lang_discrepancies <- data_articles %>%  
+  inner_join(read_xlsx("data/language_conversion.xlsx") %>% 
+              filter(`Same language?` == 0), 
+              by = c("wos_language", "oa_language"))
+```
+
+```{r}
+writexl::write_xlsx(lang_discrepancies, "data/_discrepancies_language.xlsx")
+```
+
+##### WoS
+
+```{r}
+wos_lang_disc<-lang_discrepancies %>% 
+  group_by(discipline_group, wos_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  pivot_wider(names_from = discipline_group, values_from = n) %>%
+  mutate(across(everything(), ~replace(., is.na(.), 0))) %>% 
+  mutate(total = AH+BM+NSE+SS) %>% 
+  mutate(rank = rank(desc(total))) %>%
+  mutate(wos_language = ifelse(wos_language %in% wos_lang$wos_language,wos_language,"Other")) %>% 
+  mutate(rank = ifelse(wos_language == "Other",99,rank)) %>% 
+  group_by(wos_language, rank) %>% 
+  reframe(NSE = sum(NSE),
+           BM = sum(BM),
+           SS = sum(SS),
+           AH = sum(AH),
+           total = sum(total)) %>% 
+  arrange(rank) %>% 
+  select(-rank)
+```
+
+##### OpenAlex
+
+```{r}
+oa_lang_disc<-lang_discrepancies %>% 
+  group_by(discipline_group, oa_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  pivot_wider(names_from = discipline_group, values_from = n) %>%
+  mutate(across(everything(), ~replace(., is.na(.), 0))) %>% 
+  mutate(total = AH+BM+NSE+SS) %>% 
+  mutate(rank = rank(desc(total))) %>%
+    mutate(oa_language = case_when(oa_language == "en" ~ "English",
+                                 oa_language == "es" ~ "Spanish",
+                                 oa_language == "de" ~ "German",
+                                 oa_language == "fr" ~ "French",
+                                 oa_language == "pt" ~ "Portugese",
+                                 oa_language == "pl" ~ "Polish",
+                                 oa_language == "tr" ~ "Turkish",
+                                 oa_language == "hu" ~ "Hungarian",
+                                 oa_language == "hr" ~ "Croatian",
+                                 oa_language == "ro" ~ "Romanian"
+                                 )) %>% 
+  mutate(oa_language = ifelse(is.na(oa_language),"Other",oa_language)) %>% 
+  mutate(oa_language = ifelse(oa_language %in% oa_lang$oa_language,oa_language,"Other")) %>% 
+  mutate(rank = ifelse(oa_language == "Other",99,rank)) %>% 
+  group_by(oa_language, rank) %>% 
+  reframe(NSE = sum(NSE),
+           BM = sum(BM),
+           SS = sum(SS),
+           AH = sum(AH),
+           total = sum(total)) %>% 
+  arrange(rank) %>% 
+  select(-rank) %>% 
+  ungroup()
+```
+
+#### Sample of discrepancies for verification
+
+##### WoS
+
+Calculate the sample size in %
+
+```{r}
+
+sample_size(filter(wos_lang_disc, wos_language == "English")$total)
+# 377
+sample_size(filter(wos_lang_disc, wos_language == "English")$total)/filter(wos_lang_disc, wos_language == "English")$total*100
+1.88
+```
+
+```{r}
+wos_lang_disc_sample<-lang_discrepancies %>%
+  filter(wos_language == "English") %>%
+  ungroup() %>% 
+  slice_sample(prop=sample_size(filter(wos_lang_disc, wos_language == "English")$total)/filter(wos_lang_disc, wos_language == "English")$total, by=c("discipline_group","oa_language")) %>% 
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, doi, doi_url, wos_language, oa_language) %>% 
+  mutate(correct_language = as.character(NA))
+
+wos_lang_disc_sample %>% 
+  group_by(oa_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  mutate(rank = rank(desc(n))) %>% 
+  arrange(rank) %>% 
+  select(-rank) %>% 
+  mutate(oa_language = case_when(oa_language == "en" ~ "English",
+                                 oa_language == "es" ~ "Spanish",
+                                 oa_language == "de" ~ "German",
+                                 oa_language == "fr" ~ "French",
+                                 oa_language == "pt" ~ "Portugese",
+                                 oa_language == "pl" ~ "Polish",
+                                 oa_language == "tr" ~ "Turkish",
+                                 oa_language == "hu" ~ "Hungarian",
+                                 oa_language == "hr" ~ "Croatian",
+                                 oa_language == "ro" ~ "Romanian",
+                                 oa_language == "id" ~ "Indonesian")) %>% 
+  mutate(oa_language = ifelse(is.na(oa_language),"Other",oa_language)) %>% 
+  group_by(oa_language) %>% 
+  reframe(n = sum(n))
+```
+
+Create the Excel file for manual validation
+
+```{r}
+wos_lang_disc_sample %>%
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(doi, doi_url, oa_language, wos_language) %>% 
+  mutate(correct_language = as.character(NA)) %>% 
+  writexl::write_xlsx("data/discrepancies_sample_wos_language.xlsx")
+  
+```
+
+##### OpenAlex
+
+```{r}
+sample_size(filter(oa_lang_disc, oa_language == "English")$total)
+# 373
+sample_size(filter(oa_lang_disc, oa_language == "English")$total)/filter(oa_lang_disc, oa_language == "English")$total*100
+3.01
+```
+
+```{r}
+oa_lang_disc_sample<-lang_discrepancies %>%
+  filter(oa_language == "en") %>% 
+  ungroup() %>% 
+  slice_sample(prop=0.0301, by=c("discipline_group","wos_language")) %>% 
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, doi, doi_url, wos_language, oa_language) %>% 
+  mutate(correct_language = as.character(NA))
+```
+
+```{r}
+oa_lang_disc_sample %>%
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(doi, doi_url, wos_language, oa_language) %>% 
+  mutate(correct_language = as.character(NA)) %>% 
+  writexl::write_xlsx("data/discrepancies_sample_oa_language.xlsx")
+```
+
+## Number of authors
+
+```{r}
+n_author_discrepancies<-data_articles %>%  
+  filter(wos_n_author - oa_n_author != 0) %>% 
+  mutate(diff_n_author = wos_n_author - oa_n_author) %>% 
+  select(discipline_group, doi, wos_n_author, oa_n_author, diff_n_author) 
+
+n_author_discrepancies<- n_author_discrepancies %>% 
+    ungroup() %>% 
+    mutate(bin = case_when(diff_n_author < -3 ~ "< -3",
+                         diff_n_author %in% (-2:-3) ~ "-2 to -5",
+                         diff_n_author == -1 ~ "-1",
+                         diff_n_author == 1 ~ "1",
+                         diff_n_author %in% 2:3 ~ "2 to 3",
+                         diff_n_author > 3 ~ "> 3",
+                         ))
+
+```
+
+```{r}
+writexl::write_xlsx(n_author_discrepancies, "data/_discrepancies_n_authors.xlsx")
+```
+
+```{r}
+
+s<-sample_size(nrow(n_author_discrepancies))/nrow(n_author_discrepancies)
+sample_n_author_discrepancies <- n_author_discrepancies %>%
+  ungroup() %>% 
+  slice_sample(prop = s, by=c("discipline_group","bin"))
+  
+```
+
+```{r}
+sample_n_author_discrepancies %>%
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
+  select(discipline_group, doi_url, oa_n_author, wos_n_author) %>% 
+  mutate(correct_n_author = as.numeric(NA)) %>% 
+  writexl::write_xlsx("data/discrepancy_sample_n_author.xlsx")
+
+sample_n_author_discrepancies %>% 
+  mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>% 
+  select(doi = doi_url, oa_n_author, wos_n_author) %>% 
+  mutate(correct_n_author = as.numeric(NA)) %>% 
+  writexl::write_xlsx("data/discrepancies_sample_n_author.xlsx")
+```
+
+```{r}
+
+n_authors_old<-read_xlsx("data/discrepancy_sample_n_author_old.xlsx")
+
+n_authors_old %>%
+  group_by(diff) %>% 
+  reframe(n=n()) %>% 
+  arrange(desc(n))
+
+n_authors_old <- n_authors_old %>% 
+  mutate(bin = case_when(diff < -3 ~ "< -3",
+                         diff %in% (-2:-3) ~ "-2 to -3",
+                         diff == -1 ~ "-1",
+                         diff == 1 ~ "1",
+                         diff %in% 2:3 ~ "2 to 3",
+                         diff > 3 ~ "> 3",
+                         ))
+
+x<-sample_n_author_discrepancies %>% 
+  group_by(bin, discipline_group) %>% 
+  reframe(n = n())
+  
+a<-tibble()
+i=1
+while(i <= nrow(x)) {
+  dg<-x$discipline_group[i]
+  b<-x$bin[i] 
+  n<-x$n[i]
+  y<- n_authors_old %>% 
+    filter(discipline_group == dg & bin == b) %>%
+    slice_sample(n=n)
+  
+  z<-bind_rows(y,
+               sample_n_author_discrepancies %>%
+                 filter(discipline_group == dg & bin
+                        == l) %>% 
+                 slice_sample(n=n-nrow(y)))
+  
+  a<-bind_rows(a,z)
+  i=i+1
+}
+
+
+a %>% 
+  group_by(bin) %>% 
+  reframe(n = n()) %>%
+  arrange(desc(n))
+
+
+writexl::write_xlsx(a, "data/final_n_author_sample.xlsx" ) 
+
+
+
+```
+
+## Preparing dataset with all the discrepancies
+
+```{r}
+
+x <- lang_discrepancies %>% 
+  select(doi) %>% 
+  mutate(disc_lang = T)
+
+full_data <- data %>% 
+  mutate(discrepancy_doc_type = ifelse(oa_type!=wos_type,T,F)) %>%
+  mutate(discrepancy_doc_type = ifelse(oa_type=="article" & wos_type == "review",F,discrepancy_doc_type)) %>% 
+  mutate(discrepancy_doc_type = ifelse(oa_type=="review" & wos_type == "article",F,discrepancy_doc_type)) %>% 
+  mutate(diff_pub_year = wos_pub_year - oa_pub_year) %>% 
+  mutate(disc_pub_year = ifelse(diff_pub_year != 0,T,F)) %>% 
+  mutate(diff_n_author = wos_n_author - oa_n_author) %>% 
+  mutate(disc_n_author = ifelse(diff_n_author != 0,T,F)) %>% 
+  left_join(x, by="doi") %>% 
+  mutate(disc_lang = ifelse(is.na(disc_lang),F,T))
+
+# saveRDS(full_data, "data/full_data.rds")
+```
