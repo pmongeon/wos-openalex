@@ -1,0 +1,29 @@
+project:
+  type: manuscript
+  output-dir: _docs
+
+
+manuscript:
+  article: index.qmd
+  notebooks: 
+    - "!index.qmd"
+format:
+  wordcount-html: 
+    wordcount-banner: true
+  html:
+    manuscript: true
+    comments:
+      hypothesis: false
+    theme: default
+    light: true
+
+
+  docx: default
+ # jats: default
+ # pdf: default
+
+execute:
+  freeze: false
+
+editor: visual
+
