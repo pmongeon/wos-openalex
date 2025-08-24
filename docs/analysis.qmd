@@ -1,0 +1,515 @@
+---
+title: "Analysis"
+author: "Philippe Mongeon"
+---
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+data<-readRDS("data/_data.rds")
+data_articles<-readRDS("data/_data_articles.rds")
+```
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+
+table1 <- data %>% 
+  group_by(wos_type) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  rownames_to_column("rank") %>% 
+  mutate(rank = as.numeric(rank)) %>% 
+  mutate(wos_type = ifelse(rank < 11,wos_type,"other")) %>% 
+  group_by(wos_type) %>% 
+  reframe(n = sum(n)) %>% 
+  mutate(pct = round(n / sum(n) * 100,2)) %>% 
+  arrange(desc(n))
+
+table1 <- bind_rows(table1, summarise(table1, wos_type = "total", n = sum(n), pct=100))
+
+table1 %>% 
+  writexl::write_xlsx("data/table1.xlsx")
+```
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+table2 <- data %>% 
+  group_by(oa_type) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  rownames_to_column("rank") %>% 
+  mutate(rank = as.numeric(rank)) %>% 
+  mutate(oa_type = ifelse(rank < 11,oa_type,"other")) %>% 
+  group_by(oa_type) %>% 
+  reframe(n = sum(n)) %>% 
+  mutate(pct = round(n / sum(n) * 100,2)) %>% 
+  arrange(desc(n))
+
+table2 <- bind_rows(table2, summarise(table2, oa_type = "total", n = sum(n), pct=100))
+
+writexl::write_xlsx(table2, "data/table2.xlsx")
+```
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+a<-readxl::read_xlsx("data/_all_doc_type_discrepancies.xlsx")
+sample<- readxl::read_xlsx("data/_final_wos_doc_type_sample.xlsx")
+
+x<-a %>% 
+  filter(wos_type %in% c("article","review")) %>% 
+  left_join(sample %>% select(doi, most_accurate_source, note, correct_type), 
+            by="doi") %>% 
+  mutate(oa_type = ifelse(oa_type %in% c("report", "dataset", "other", "dissertation" , "supplementary-materials","reference-entry"), "other", oa_type)) %>%
+  group_by(oa_type) %>% 
+  reframe(Discrepancies_n = n()) %>% 
+  mutate(Discrepancies_pct = round(Discrepancies_n/sum(Discrepancies_n)*100,1)) %>% 
+  arrange(desc(Discrepancies_n))
+
+y<-a %>% 
+  filter(wos_type %in% c("article","review")) %>% 
+  inner_join(sample %>% select(doi, most_accurate_source, note, correct_type), 
+            by="doi") %>% 
+  mutate(oa_type = ifelse(oa_type %in% c("report", "dataset", "other", "dissertation" , "supplementary-materials","reference-entry"), "other", oa_type)) %>%
+  group_by(oa_type) %>% 
+  reframe(Sample_n = n()) %>% 
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+z<-a %>%  
+  filter(wos_type %in% c("article","review")) %>% 
+  inner_join(sample %>% select(doi, most_accurate_source, note, correct_type), 
+            by="doi") %>% 
+  mutate(oa_type = ifelse(oa_type %in% c("report", "dataset", "other", "dissertation" , "supplementary-materials","reference-entry"), "other", oa_type)) %>%
+  filter(most_accurate_source != "wos") %>% 
+  group_by(oa_type) %>% 
+  reframe(Errors_n = n())
+
+table3<- x %>% 
+  left_join(y, by="oa_type") %>% 
+  left_join(z, by="oa_type") %>% 
+  mutate(Errors_pct = round(Errors_n/Sample_n*100,1)) %>% 
+  rename(`Type in OpenAlex` = oa_type) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+  
+
+table3 <- bind_rows(table3, 
+                    summarise(table3, `Type in OpenAlex` = "total", 
+                              Discrepancies_n = sum(Discrepancies_n),
+                              Discrepancies_pct=100,
+                              Sample_n = sum(Sample_n),
+                              Sample_pct = 100,
+                              Errors_n = sum(Errors_n)) %>% 
+                    mutate(Errors_pct = ifelse(`Type in OpenAlex` == "total",
+                                               round(sum(Errors_n)/sum(Sample_n)*100,
+                                                     1),
+                                               Errors_pct)))
+writexl::write_xlsx(table3, "data/table3.xlsx")
+```
+
+```{r echo=FALSE, eval=FALSE, message=FALSE, warning=FALSE}
+a<-readxl::read_xlsx("data/_all_doc_type_discrepancies.xlsx") %>% 
+  filter(wos_type != "meeting abstract")
+
+sample<- readxl::read_xlsx("data/_final_oa_doc_type_sample.xlsx")
+
+x<-a %>% 
+  filter(oa_type %in% c("article","review")) %>% 
+  left_join(sample %>% select(doi, most_accurate_source, note), 
+            by="doi") %>% 
+  mutate(wos_type = ifelse(wos_type %in% c("editorial material","book review","letter", "correction", "news item","biographical-item","retraction"), wos_type, "other")) %>%
+  group_by(wos_type) %>% 
+  reframe(Discrepancies_n = n()) %>% 
+  mutate(Discrepancies_pct = round(Discrepancies_n/sum(Discrepancies_n)*100,1)) %>% 
+  arrange(desc(Discrepancies_n))
+
+y<-a %>% 
+  filter(oa_type %in% c("article","review")) %>% 
+  inner_join(sample %>% select(doi, most_accurate_source, note), 
+            by="doi") %>% 
+  mutate(wos_type = ifelse(wos_type %in% c("editorial material","book review","letter", "correction", "news item","biographical-item","retraction"), wos_type, "other")) %>%
+  group_by(wos_type) %>% 
+  reframe(Sample_n = n()) %>% 
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+z<-a %>%  
+  filter(oa_type %in% c("article","review")) %>% 
+  inner_join(sample %>% select(doi, most_accurate_source, note), 
+            by="doi") %>% 
+    mutate(wos_type = ifelse(wos_type %in% c("editorial material","book review","letter", "correction", "news item","biographical-item","retraction"), wos_type, "other")) %>% 
+  filter(most_accurate_source != "oa") %>% 
+  group_by(wos_type) %>% 
+  reframe(Errors_n = n())
+
+table4<- x %>% 
+  left_join(y, by="wos_type") %>% 
+  left_join(z, by="wos_type") %>% 
+  mutate(Errors_pct = round(Errors_n/Sample_n*100,1)) %>% 
+  rename(`Type in WoS` = wos_type) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+  
+
+table4 <- bind_rows(table4, 
+                    summarise(table4, `Type in WoS` = "total", 
+                              Discrepancies_n = sum(Discrepancies_n),
+                              Discrepancies_pct=100,
+                              Sample_n = sum(Sample_n),
+                              Sample_pct = 100,
+                              Errors_n = sum(Errors_n)) %>% 
+                    mutate(Errors_pct = ifelse(`Type in WoS` == "total",
+                                               round(sum(Errors_n)/sum(Sample_n)*100,
+                                                     1),
+                                               Errors_pct)))
+
+writexl::write_xlsx(table4, "data/table4.xlsx")
+```
+
+```{r eval=FALSE}
+table5 <- data_articles %>% 
+  group_by(wos_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  rownames_to_column("rank") %>% 
+  mutate(rank = as.numeric(rank)) %>% 
+  mutate(wos_language = ifelse(rank < 11,wos_language,"Other")) %>% 
+  group_by(wos_language) %>% 
+  reframe(n = sum(n)) %>% 
+  mutate(pct = round(n / sum(n) * 100,2)) %>% 
+  arrange(desc(n))
+
+table5 <- bind_rows(table5, summarise(table5, 
+                                      wos_language = "Total", 
+                                      n = sum(n), 
+                                      pct=100))
+
+table5 %>% 
+  rename(`Language in WoS` = wos_language,
+         Records_n = n,
+         Records_pct = pct) %>% 
+  writexl::write_xlsx("data/table5.xlsx")
+
+```
+
+```{r eval=FALSE}
+
+table6 <- data_articles %>% 
+  group_by(oa_language) %>% 
+  reframe(n = n()) %>% 
+  arrange(desc(n)) %>% 
+  rownames_to_column("rank") %>% 
+  mutate(rank = as.numeric(rank)) %>% 
+  mutate(oa_language = ifelse(rank < 12,oa_language,"Other")) %>% 
+  group_by(oa_language) %>% 
+  reframe(n = sum(n)) %>% 
+  mutate(pct = round(n / sum(n) * 100,2)) %>% 
+  arrange(desc(n))
+
+table6 <- bind_rows(table6, summarise(table6, 
+                                      oa_language = "Total", 
+                                      n = sum(n), 
+                                      pct=100))
+
+table6 %>% 
+  rename(`Language in OpenAlex` = oa_language,
+         Records_n = n,
+         Records_pct = pct) %>% 
+  writexl::write_xlsx("data/table6.xlsx")
+```
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(flextable)
+library(officer)
+
+a<-readxl::read_xlsx("data/_discrepancies_language.xlsx") %>% 
+      mutate(oa_language = case_when(oa_language == "en" ~ "English",
+                                 oa_language == "es" ~ "Spanish",
+                                 oa_language == "de" ~ "German",
+                                 oa_language == "fr" ~ "French",
+                                 oa_language == "pt" ~ "Portugese",
+                                 oa_language == "pl" ~ "Polish",
+                                 oa_language == "tr" ~ "Turkish",
+                                 oa_language == "hu" ~ "Hungarian",
+                                 oa_language == "hr" ~ "Croatian",
+                                 oa_language == "ro" ~ "Romanian",
+                                 TRUE ~ "Other"))
+
+sample<- readxl::read_xlsx("data/_final_wos_lang_sample.xlsx") %>% 
+    mutate(oa_language = case_when(oa_language == "en" ~ "English",
+                                 oa_language == "es" ~ "Spanish",
+                                 oa_language == "de" ~ "German",
+                                 oa_language == "fr" ~ "French",
+                                 oa_language == "pt" ~ "Portugese",
+                                 oa_language == "pl" ~ "Polish",
+                                 oa_language == "tr" ~ "Turkish",
+                                 oa_language == "hu" ~ "Hungarian",
+                                 oa_language == "hr" ~ "Croatian",
+                                 oa_language == "ro" ~ "Romanian",
+                                 TRUE ~ "Other"))
+
+x<-a %>% 
+  filter(wos_language == "English") %>% 
+  group_by(oa_language) %>% 
+  reframe(Discrepancies_n = n()) %>% 
+  mutate(Discrepancies_pct = round(Discrepancies_n/sum(Discrepancies_n)*100,1)) %>% 
+  arrange(desc(Discrepancies_n)) 
+
+y<-sample %>% 
+  filter(wos_language == "English") %>% 
+  filter(!is.na(error)) %>% 
+  group_by(oa_language) %>% 
+  reframe(Sample_n = n()) %>% 
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+z<-sample %>%  
+  filter(wos_language == "English") %>% 
+  filter(error == "1") %>% 
+  group_by(oa_language) %>% 
+  reframe(Errors_n = n())
+
+table7<- x %>% 
+  left_join(y, by="oa_language") %>% 
+  left_join(z, by="oa_language") %>% 
+  mutate(Errors_pct = round(Errors_n/Sample_n*100,1)) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+  
+
+table7 <- bind_rows(table7, 
+                    summarise(table7, oa_language= "Total", 
+                              Discrepancies_n = sum(Discrepancies_n),
+                              Discrepancies_pct=100,
+                              Sample_n = sum(Sample_n),
+                              Sample_pct = 100,
+                              Errors_n = sum(Errors_n)) %>% 
+                    mutate(Errors_pct = ifelse(oa_language == "Total",
+                                               round(sum(Errors_n)/sum(Sample_n)*100,
+                                                     1),
+                                               Errors_pct)))
+
+writexl::write_xlsx(table7,"data/table7.xlsx")
+```
+
+```{r eval = FALSE}
+library(readxl)
+library(tidyverse)
+library(flextable)
+library(officer)
+
+a<-readxl::read_xlsx("data/_discrepancies_language.xlsx") %>% 
+  mutate(wos_language = ifelse(wos_language %in% c("German","Spanish","German","French","Chinese","Russian","Portuguese","Polish","Japanese","Turkish"),wos_language,"Other"))
+  
+  
+  
+sample<- readxl::read_xlsx("data/_final_oa_lang_sample.xlsx") %>% 
+  mutate(wos_language = ifelse(wos_language %in% c("German","Spanish","German","French","Chinese","Russian","Portuguese","Polish","Japanese","Turkish"),wos_language,"Other"))
+
+x<-a %>% 
+  filter(oa_language == "en") %>% 
+  group_by(wos_language) %>% 
+  reframe(Discrepancies_n = n()) %>% 
+  mutate(Discrepancies_pct = round(Discrepancies_n/sum(Discrepancies_n)*100,1)) %>%
+  arrange(desc(Discrepancies_n)) 
+
+y<-sample %>% 
+  filter(oa_language == "en") %>% 
+  filter(!is.na(error)) %>% 
+  group_by(wos_language) %>% 
+  reframe(Sample_n = n()) %>% 
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+z<-sample %>%  
+  filter(oa_language == "en") %>% 
+  filter(error == 1) %>% 
+  group_by(wos_language) %>% 
+  reframe(Errors_n = n())
+
+table8<- x %>% 
+  left_join(y, by="wos_language") %>% 
+  left_join(z, by="wos_language") %>% 
+  mutate(Errors_pct = round(Errors_n/Sample_n*100,1)) %>% 
+  mutate(across(everything(), ~replace_na(.x, 0)))
+
+  
+
+table8 <- bind_rows(table8, 
+                    summarise(table8, wos_language= "Total", 
+                              Discrepancies_n = sum(Discrepancies_n),
+                              Discrepancies_pct=100,
+                              Sample_n = sum(Sample_n),
+                              Sample_pct = 100,
+                              Errors_n = sum(Errors_n)) %>% 
+                    mutate(Errors_pct = ifelse(wos_language == "Total",
+                                               round(sum(Errors_n)/sum(Sample_n)*100,
+                                                     1),
+                                               Errors_pct)))
+
+writexl::write_xlsx(table8,"data/table8.xlsx")
+
+```
+
+```{r eval=FALSE}
+data_articles %>% 
+  select(discipline_group, value = oa_pub_year) %>% 
+  mutate(database = "OpenAlex") %>% 
+  bind_rows(data_articles %>% 
+              select(discipline_group, value = wos_pub_year) %>% 
+              mutate(database = "WoS")) %>% 
+  group_by(database) %>% 
+  reframe(n = n(),
+            mean = mean(value),
+            sd = round(sd(value),3),
+            var = round(var(value),3),
+            q1 = quantile(value,0.25),
+            median = median(value),
+            q3 = quantile(value,0.75),
+            min = min(value),
+            max = max(value),
+            skew = round(skew(value),3),
+            kurtosis = round(kurtosi(value),3)
+            ) %>% 
+  writexl::write_xlsx("data/table9.xlsx")
+
+ # data_articles %>%
+ #   select(discipline_group, value = oa_pub_year) %>%
+ #   mutate(database = "OpenAlex") %>%
+ #   bind_rows(data_articles %>%
+ #               select(discipline_group, value = wos_pub_year) %>%
+ #               mutate(database = "WoS")) %>%
+ #   group_by(database) %>%
+ #   ggplot() +
+ #   aes(x=as.character(database), y = value) +
+ #   geom_boxplot()
+
+```
+
+```{r eval = FALSE}
+a<-readxl::read_xlsx("data/_discrepancies_pub_year.xlsx") %>% 
+  select(doi, oa_pub_year, wos_pub_year) %>% 
+  mutate(diff_pub_year = wos_pub_year - oa_pub_year) %>% 
+  filter(diff_pub_year != 0) %>%
+  mutate(bin = case_when(diff_pub_year < -3 ~ "< -3",
+                         diff_pub_year %in% (-2:-3) ~ "-2 to -3",
+                         diff_pub_year == -1 ~ "-1",
+                         diff_pub_year == 1 ~ "1",
+                         diff_pub_year %in% 2:3 ~ "2 to 3",
+                         diff_pub_year > 3 ~ "> 3",
+                         )) %>%
+  group_by(bin) %>% 
+  reframe(n = n())
+
+a<-a %>% 
+  mutate(pct = round(n/sum(n)*100,1)) %>%
+  slice(c(2,1,3:5)) %>% 
+  add_row(bin = "Total", n = sum(a$n), pct = 100)
+
+sample<- readxl::read_xlsx("data/_final_pub_year_sample.xlsx") %>% 
+    mutate(bin = case_when(diff_pub_year < -3 ~ "< -3",
+                         diff_pub_year %in% (-2:-3) ~ "-2 to -3",
+                         diff_pub_year == -1 ~ "-1",
+                         diff_pub_year == 1 ~ "1",
+                         diff_pub_year %in% 2:3 ~ "2 to 3",
+                         diff_pub_year > 3 ~ "> 3",
+                         )) %>% 
+  group_by(bin) %>% 
+  reframe(Sample_n = n()) %>%
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+sample<-sample %>% 
+    add_row(bin = "Total", Sample_n = sum(sample$Sample_n), Sample_pct = 100) 
+
+a %>% 
+  left_join(sample, by="bin") %>% 
+  rename(Discrepancies_n = n, Discrepancies_pct = pct) %>% 
+  writexl::write_xlsx("data/table10.xlsx")
+```
+
+```{r eval=FALSE}
+data_articles %>% 
+  select(discipline_group, value = oa_n_author) %>% 
+  mutate(database = "OpenAlex") %>% 
+  bind_rows(data_articles %>% 
+              select(discipline_group, value = wos_n_author) %>% 
+              mutate(database = "WoS")) %>% 
+  group_by(database) %>% 
+  reframe(n = n(),
+            mean = mean(value),
+            sd = round(sd(value),3),
+            var = round(var(value),3),
+            q1 = quantile(value,0.25),
+            median = median(value),
+            q3 = quantile(value,0.75),
+            min = min(value),
+            max = max(value),
+            skew = round(skew(value),3),
+            kurtosis = round(kurtosi(value),3)
+            ) %>% 
+  writexl::write_xlsx("data/table11.xlsx")
+```
+
+```{r eval=FALSE}
+a<-readxl::read_xlsx("data/_discrepancies_n_authors.xlsx") %>% 
+  select(doi, oa_n_author, wos_n_author) %>% 
+  mutate(diff_n_author = wos_n_author - oa_n_author) %>% 
+  filter(diff_n_author != 0) %>%
+  mutate(bin = case_when(diff_n_author < -3 ~ "< -3",
+                         diff_n_author %in% (-2:-3) ~ "-2 to -3",
+                         diff_n_author == -1 ~ "-1",
+                         diff_n_author == 1 ~ "1",
+                         diff_n_author %in% 2:3 ~ "2 to 3",
+                         diff_n_author > 3 ~ "> 3",
+                         )) %>%
+  group_by(bin) %>% 
+  reframe(n = n())
+
+a<-a %>% 
+  mutate(pct = round(n/sum(n)*100,1)) %>%
+  slice(c(2,1,3:5)) %>% 
+  add_row(bin = "Total", n = sum(a$n), pct = 100)
+
+sample<- readxl::read_xlsx("data/_final_n_author_sample.xlsx") %>% 
+    mutate(bin = case_when(diff < -3 ~ "< -3",
+                         diff %in% (-2:-3) ~ "-2 to -3",
+                         diff == -1 ~ "-1",
+                         diff == 1 ~ "1",
+                         diff %in% 2:3 ~ "2 to 3",
+                         diff > 3 ~ "> 3",
+                         )) %>% 
+  group_by(bin) %>% 
+  reframe(Sample_n = n()) %>%
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1))
+
+sample<-sample %>% 
+    add_row(bin = "Total", Sample_n = sum(sample$Sample_n), Sample_pct = 100) 
+
+a %>% 
+  left_join(sample, by="bin") %>% 
+  rename(Discrepancies_n = n, Discrepancies_pct = pct) %>% 
+  writexl::write_xlsx("data/table12.xlsx")
+```
+
+```{r eval = FALSE}
+sample<- readxl::read_xlsx("data/_final_n_author_sample.xlsx") %>% 
+  filter(Group_dichotomous == "no") %>% 
+  group_by(bin) %>% 
+  reframe(Sample_n = n(),
+          OpenAlex_n = sum(oa_valid, na.rm=TRUE),
+          WoS_n = sum(wos_valid, na.rm=TRUE),) %>%
+  mutate(Sample_pct = round(Sample_n/sum(Sample_n)*100,1),
+         OpenAlex_pct = round(OpenAlex_n/Sample_n*100,1),
+         WoS_pct = round(WoS_n/Sample_n*100,1),) %>% 
+  select(bin, Sample_n, Sample_pct, OpenAlex_n, OpenAlex_pct, WoS_n, WoS_pct)
+
+
+sample<-sample %>% 
+    add_row(bin = "Total", 
+            Sample_n = sum(sample$Sample_n), 
+            Sample_pct = 100,
+            OpenAlex_n = sum(sample$OpenAlex_n), 
+            OpenAlex_pct = round(sum(sample$OpenAlex_n)/sum(sample$Sample_n)*100,1),
+            WoS_n = sum(sample$WoS_n),
+            WoS_pct = round(sum(sample$WoS_n)/sum(sample$Sample_n)*100,1))
+
+sample<-sample %>% 
+  slice(5,2,1,3,4,6,7)
+
+sample
+sample %>% 
+  writexl::write_xlsx("data/table14.xlsx")
+```

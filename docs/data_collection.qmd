@@ -44,7 +44,13 @@ select * from BDMongeon..wos_all
 ```{r}
 wos_data <- read_delim("data/wos_all.csv", col_names = F, delim = ";")
 colnames(wos_data) <- c("discipline", "OST_BK", "wos_doi","wos_type","wos_pub_year","wod_n_address","wos_n_inst","wos_n_author","wos_n_ref","wos_n_ref_indexed", "wos_lang_type","wos_language")
+wos_data <- wos_data %>% select(OST_BK, discipline, wos_doi, wos_type, wos_pub_year, wos_n_author, wos_lang_type, wos_language)
 # 7661474
+
+wos_data_pre_2021 <- read_delim("data/wos_all_pre_2021.txt", col_names = FALSE)
+colnames(wos_data_pre_2021) <- c("OST_BK", "discipline", "wos_doi","wos_type","wos_pub_year","wos_n_author","wos_lang_type","wos_language")
+#24,463,499
+
 ```
 
 ### removing records with multiple doc types
@@ -56,7 +62,16 @@ wos_data<-wos_data %>%
   filter(n == 1) %>% 
   ungroup() %>% 
   select(-n)
-# 7631080
+# 7,631,080
+
+wos_data_pre_2021<-wos_data_pre_2021 %>% 
+  group_by(wos_doi, wos_type) %>% 
+  mutate(n = n()) %>% 
+  filter(n == 1) %>% 
+  ungroup() %>% 
+  select(-n)
+# 24,440,114
+
 
 ```
 
@@ -66,23 +81,46 @@ The commented code was used to collect data through BigQuery and save the data i
 
 ```{r}
 library(bigrquery)
-sql <- str_c("select * from `global-timer-415013.wos_openalex.oa_works`")
+
+billing <- "879484244771"
+
+sql<-"Create table `global-timer-415013.wos_openalex.oa_works_full` AS 
+SELECT id, doi, authors_count, type, publication_year, language  FROM `insyspo.publicdb_openalex_2024_02_rm.works`
+Where publication_year > 2020 and publication_year < 2024;"
+bq_project_query(billing, sql)
+
+sql <- str_c("select * from `global-timer-415013.wos_openalex.oa_works_full`")
 tb <- bq_project_query(billing, sql)
-openalex_works<-bq_table_download(tb)
- saveRDS(openalex_works, "data/openalex_works.rds")
+openalex_works_full<-bq_table_download(tb)
+saveRDS(openalex_works_full, "data/openalex_works_full.rds")
 ```
 
 ```{r}
-oa_works <- readRDS("data/openalex_works.rds")
-colnames(oa_works) <- c("oa_doi","oa_type","oa_pub_year","oa_n_inst","oa_n_author", "oa_n_ref_indexed", "oa_language")
+oa_works_2021_2023 <- readRDS("data/openalex_works_full.rds")
+  
+oa_works_2021_2023 <- oa_works_2021_2023 %>% rename(oa_doi = doi, oa_n_author = authors_count, oa_type = type, oa_pub_year = publication_year, oa_language = language) 
+# 26,942,411
+
+oa_works_2021_2023 <- oa_works_2021_2023 %>% 
+  mutate(oa_doi = str_remove(oa_doi, "https://doi.org/"))
+ 
+oa_works_matched <- readRDS("data/openalex_works.rds") 
+colnames(oa_works_matched) <- c("oa_doi","oa_type","oa_pub_year","oa_n_inst","oa_n_author", "oa_n_ref_indexed", "oa_language")
 ```
 
 ## Creating dataset for analysis
 
 ```{r message=FALSE, warning=FALSE}
-data<-wos_data %>% 
-  inner_join(oa_works, by=c("wos_doi" = "oa_doi"))
+x<-wos_data %>% 
+  inner_join(oa_works_matched, by=c("wos_doi" = "oa_doi"))
 # 6,599,479 lines
+
+y<-wos_data_pre_2021 %>% 
+  inner_join(oa_works_2021_2023, by=c("wos_doi" = "oa_doi"))
+# 13,618
+
+data<-bind_rows(x,y)
+# 6,613,097
 
 data<-data %>% 
   rename(doi = wos_doi) %>% 
@@ -97,7 +135,12 @@ data<-data %>%
   filter(n == 1) %>%
   select(-n) %>% 
   ungroup()
-# 6,594,747 documents
+# 6,608,243 documents
+
+# fix the n_authors 
+data<-data %>% 
+  mutate(oa_n_author = ifelse(is.na(oa_n_author),n_author,oa_n_author)) %>% 
+  select(-id, -n_author, -oa_n_ref_indexed, -oa_n_inst)
 
 # replace wos_type code with text
 data<-data %>% 
@@ -106,13 +149,15 @@ data<-data %>%
   rename(wos_type = doc_type) %>% 
   mutate(wos_type = str_to_lower(wos_type))  
 
+
 # Add disciplines
 data <- data %>%
-  inner_join(read_xlsx("data/Liste_Discipline.xlsx") %>% 
-               select(Code_Discipline, EDiscipline, ESpecialite, discipline_group), by=c("discipline" = "Code_Discipline"))
+  inner_join(readxl::read_xlsx("data/Liste_Discipline.xlsx") %>% 
+               select(Code_Discipline, discipline_group), by=c("discipline" = "Code_Discipline"))
 
 saveRDS(data, "data/_data.rds")
 rm(oa_works, wos_data)
+rm(oa_works_2021_2023, oa_works_matched, x, y, wos_data_pre_2021)
 
 ## To just load the file
 data<-readRDS("data/_data.rds")
@@ -144,7 +189,7 @@ doc_type_discrepancies<-data %>%
   mutate(doi_url = str_c("https://doi.org/",doi , sep="")) %>%
   select(discipline_group, doi, doi_url, oa_type, wos_type)
   
-# Number of doc type discrepancies: 582,786
+# Number of doc type discrepancies: 584,555
 
 writexl::write_xlsx(doc_type_discrepancies,"data/_all_doc_type_discrepancies.xlsx")
 
@@ -153,7 +198,7 @@ doc_type_discrepancies %>%
   select(discipline_group, doi, doi_url, oa_type, wos_type) %>% 
   filter(oa_type %in% c("article","review") | wos_type %in% c("review","article")) %>% 
   count()
-# 427,953
+# 429,692
 ```
 
 #### Sample
@@ -162,18 +207,23 @@ doc_type_discrepancies %>%
 doc_type_discrepancies %>% 
   filter(oa_type %in% c("article","review")) %>%
   filter(!wos_type %in% c("article","review","meeting_abstract")) %>% 
-  slice_sample(prop=sample_size(418965)/418965, by=c("discipline_group","wos_type")) %>% 
-  writexl::write_xlsx("data/_final_oa_doc_type_sample.xlsx")
+  count()
+
+#%>% 
+#  slice_sample(prop=sample_size(418965)/418965, by=c("discipline_group","wos_type")) %>% 
+#  writexl::write_xlsx("data/_final_oa_doc_type_sample.xlsx")
 
 doc_type_discrepancies %>% 
   filter(wos_type %in% c("article","review")) %>%
-  filter(!oa_type %in% c("article","review")) %>% 
-  slice_sample(prop=sample_size(8988)/8988, by=c("discipline_group","wos_type")) %>% 
-  writexl::write_xlsx("data/_final_wos_doc_type_sample.xlsx")
+  filter(!oa_type %in% c("article","review")) %>%
+  count()
 
-# 427593 total
-# 8988 for WoS
-# 418965 for OpenAlex
+#  slice_sample(prop=sample_size(8988)/8988, by=c("discipline_group","wos_type")) %>% 
+#  writexl::write_xlsx("data/_final_wos_doc_type_sample.xlsx")
+
+# 429,692
+# 8993 for WoS
+# 420699 for OpenAlex
 ```
 
 ### Subset of articles with no document type discrepancies
@@ -182,7 +232,7 @@ doc_type_discrepancies %>%
 data_articles <- data %>%
   filter(wos_type %in% c("review","article")) %>%
   filter(oa_type %in% c("review","article"))
-# 5924459 articles 
+# 5,936,235 articles 
 
 saveRDS(data_articles, "data/_data_articles.rds")
 
@@ -206,6 +256,9 @@ pub_year_discrepancies<-data_articles %>%
                          diff_pub_year > 3 ~ "> 3",
                          ))
 
+pub_year_discrepancies %>% 
+  writexl::write_xlsx("data/_discrepancies_pub_year.xlsx")
+
 # Sample  
 sample_pub_year_discrepancies <- pub_year_discrepancies %>% 
   slice_sample(prop = sample_size(469124)/469124, by = c("discipline_group", "bin"))
@@ -215,6 +268,11 @@ sample_pub_year_discrepancies %>%
   group_by(bin) %>% 
   reframe(n = n()) %>%
   arrange(desc(n))
+
+sample_pub_year_discrepancies <- bind_rows(sample_pub_year_discrepancies,
+                                           pub_year_discrepancies %>% 
+                                             filter(bin == "< -3") %>% 
+                                             slice_sample(n = 20))
 
 sample_pub_year_discrepancies <- bind_rows(sample_pub_year_discrepancies,
                                            pub_year_discrepancies %>% 
@@ -315,7 +373,7 @@ oa_lang<-lang_data %>%
 
 #### Discrepancies
 
-Create a excel file with all combinations of language and check whether they are the same language
+Create ann Excel file with all combinations of language and check whether they are the same language
 
 ```{r}
 #Conversion of languages
@@ -328,7 +386,7 @@ Create a excel file with all combinations of language and check whether they are
 
 ```{r}
 lang_discrepancies <- data_articles %>%  
-  inner_join(read_xlsx("data/language_conversion.xlsx") %>% 
+  inner_join(readxl::read_xlsx("data/language_conversion.xlsx") %>% 
               filter(`Same language?` == 0), 
               by = c("wos_language", "oa_language"))
 ```
